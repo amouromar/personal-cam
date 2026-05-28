@@ -291,26 +291,33 @@
 
       peer.on('call', (incomingCall) => {
         call = incomingCall;
-        incomingCall.answer();
+        incomingCall.answer(new MediaStream());
         incomingCall.on('stream', async (phoneStream) => {
           stream = phoneStream;
 
           const finalTracks = [];
 
-          // video always from phone
+          // always use phone video
           const phoneVideoTracks = phoneStream.getVideoTracks();
-          finalTracks.push(...phoneVideoTracks);
+          if (phoneVideoTracks.length === 0) {
+            setStatus('No video track received from phone.');
+            return;
+          }
+
+          finalTracks.push(phoneVideoTracks[0]);
 
           // choose audio source
           if (usePcMic.checked) {
             const pcMic = await getPcMicStream();
-            if (pcMic) {
-              finalTracks.push(...pcMic.getAudioTracks());
-              setStatus('Using PHONE camera + PC microphone.');
+
+            if (pcMic && pcMic.getAudioTracks().length > 0) {
+              finalTracks.push(pcMic.getAudioTracks()[0]);
             }
           } else {
-            finalTracks.push(...phoneStream.getAudioTracks());
-            setStatus('Using PHONE camera + PHONE microphone.');
+            const phoneAudioTracks = phoneStream.getAudioTracks();
+            if (phoneAudioTracks.length > 0) {
+              finalTracks.push(phoneAudioTracks[0]);
+            }
           }
 
           combinedStream = new MediaStream(finalTracks);
@@ -332,22 +339,25 @@
         setStatus('No room id found in the QR link.');
         return;
       }
+
       setBadge('Phone');
-      setStatus('Requesting camera and microphone access...');
+      setStatus('Requesting phone camera access...');
+
       const selectedCamera = cameraSelect.value;
-      const selectedMic = micSelect.value;
 
       const phoneStream = await navigator.mediaDevices.getUserMedia({
-        video: selectedCamera ? { deviceId: { exact: selectedCamera } } : true,
-        audio: selectedMic ? {
-          deviceId: { exact: selectedMic },
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false
-        } : true
+        video: selectedCamera
+          ? {
+              deviceId: { exact: selectedCamera },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 }
+            }
+          : true,
+        audio: false
       });
 
       currentPhoneStream = phoneStream;
+
       remoteVideo.srcObject = phoneStream;
       remoteVideo.muted = true;
       remoteVideo.play().catch(() => {});
@@ -359,10 +369,13 @@
 
         const outbound = peer.call(roomId, phoneStream);
         outbound.on('error', (err) => setStatus('Call error: ' + err.type));
-        setStatus('Calling the PC room...');
+        setStatus('Phone connected. Sending video feed to PC...');
       });
 
-      peer.on('error', (err) => setStatus('PeerJS error: ' + err.type));
+      peer.on('error', (err) => {
+        console.error(err);
+        setStatus('PeerJS error: ' + err.type);
+      });
     }
 
     function startRecording() {
