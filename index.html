@@ -6,7 +6,7 @@
   <title>Phone Camera Bridge</title>
   <style>
     :root {
-      --bg: #0b1220;
+      --bg: #080c14;
       --panel: #111a2e;
       --panel-2: #0f172a;
       --text: #e5eefc;
@@ -113,20 +113,6 @@
       <h1>Phone Camera Bridge</h1>
       <p>Open this on the computer. It will create a room, show a QR code, and receive your phone camera + mic over WebRTC.</p>
       <div class="row" style="margin: 14px 0 16px;">
-        <select id="cameraSelect">
-          <option>Loading cameras...</option>
-        </select>
-
-        <select id="micSelect">
-          <option>Loading microphones...</option>
-        </select>
-
-        <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;background:#10192f;border-radius:14px;border:1px solid var(--border);font-size:14px;">
-          <input type="checkbox" id="usePcMic" checked />
-          Use PC microphone for recording
-        </label>
-
-        <button id="refreshDevicesBtn" class="secondary">Refresh devices</button>
         <button id="hostBtn">Create room on this PC</button>
         <button id="copyBtn" class="secondary" disabled>Copy room link</button>
         <span id="roleBadge" class="badge">Not connected</span>
@@ -180,10 +166,6 @@
     const recordBtn = document.getElementById('recordBtn');
     const stopRecordBtn = document.getElementById('stopRecordBtn');
     const remoteVideo = document.getElementById('remoteVideo');
-    const cameraSelect = document.getElementById('cameraSelect');
-    const micSelect = document.getElementById('micSelect');
-    const refreshDevicesBtn = document.getElementById('refreshDevicesBtn');
-    const usePcMic = document.getElementById('usePcMic');
     const qrcodeEl = document.getElementById('qrcode');
     const statusEl = document.getElementById('status');
     const roomText = document.getElementById('roomText');
@@ -197,9 +179,6 @@
     let recorder;
     let chunks = [];
     let roomId = new URLSearchParams(location.search).get('room');
-    let currentPhoneStream;
-    let pcMicStream;
-    let combinedStream;
 
     function setStatus(msg) { statusEl.textContent = msg; }
     function setBadge(msg) { roleBadge.textContent = msg; }
@@ -209,63 +188,10 @@
       new QRCode(qrcodeEl, { text: url, width: 210, height: 210 });
     }
 
-    async function loadDevices() {
-      try {
-        const temp = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        temp.getTracks().forEach(track => track.stop());
-
-        const devices = await navigator.mediaDevices.enumerateDevices();
-
-        cameraSelect.innerHTML = '';
-        micSelect.innerHTML = '';
-
-        const cameras = devices.filter(d => d.kind === 'videoinput');
-        const mics = devices.filter(d => d.kind === 'audioinput');
-
-        cameras.forEach((cam, i) => {
-          const option = document.createElement('option');
-          option.value = cam.deviceId;
-          option.textContent = cam.label || `Camera ${i + 1}`;
-          cameraSelect.appendChild(option);
-        });
-
-        mics.forEach((mic, i) => {
-          const option = document.createElement('option');
-          option.value = mic.deviceId;
-          option.textContent = mic.label || `Microphone ${i + 1}`;
-          micSelect.appendChild(option);
-        });
-
-        setStatus('Devices loaded.');
-      } catch (err) {
-        setStatus('Could not load devices: ' + err.message);
-      }
-    }
-
     function buildRoomLink(id) {
       const u = new URL(location.href);
       u.searchParams.set('room', id);
       return u.toString();
-    }
-
-    async function getPcMicStream() {
-      try {
-        const selectedMic = micSelect.value;
-
-        pcMicStream = await navigator.mediaDevices.getUserMedia({
-          audio: selectedMic ? {
-            deviceId: { exact: selectedMic },
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false
-          } : true,
-          video: false
-        });
-
-        return pcMicStream;
-      } catch (err) {
-        setStatus('PC microphone failed: ' + err.message);
-      }
     }
 
     async function startHost() {
@@ -291,40 +217,13 @@
 
       peer.on('call', (incomingCall) => {
         call = incomingCall;
-        incomingCall.answer(new MediaStream());
-        incomingCall.on('stream', async (phoneStream) => {
+        incomingCall.answer();
+        incomingCall.on('stream', (phoneStream) => {
           stream = phoneStream;
-
-          const finalTracks = [];
-
-          // always use phone video
-          const phoneVideoTracks = phoneStream.getVideoTracks();
-          if (phoneVideoTracks.length === 0) {
-            setStatus('No video track received from phone.');
-            return;
-          }
-
-          finalTracks.push(phoneVideoTracks[0]);
-
-          // choose audio source
-          if (usePcMic.checked) {
-            const pcMic = await getPcMicStream();
-
-            if (pcMic && pcMic.getAudioTracks().length > 0) {
-              finalTracks.push(pcMic.getAudioTracks()[0]);
-            }
-          } else {
-            const phoneAudioTracks = phoneStream.getAudioTracks();
-            if (phoneAudioTracks.length > 0) {
-              finalTracks.push(phoneAudioTracks[0]);
-            }
-          }
-
-          combinedStream = new MediaStream(finalTracks);
-
-          remoteVideo.srcObject = combinedStream;
+          remoteVideo.srcObject = phoneStream;
           remoteVideo.play().catch(() => {});
           setBadge('Streaming');
+          setStatus('Camera + mic stream live on the PC.');
           recordBtn.disabled = false;
         });
       });
@@ -339,25 +238,9 @@
         setStatus('No room id found in the QR link.');
         return;
       }
-
       setBadge('Phone');
-      setStatus('Requesting phone camera access...');
-
-      const selectedCamera = cameraSelect.value;
-
-      const phoneStream = await navigator.mediaDevices.getUserMedia({
-        video: selectedCamera
-          ? {
-              deviceId: { exact: selectedCamera },
-              width: { ideal: 1920 },
-              height: { ideal: 1080 }
-            }
-          : true,
-        audio: false
-      });
-
-      currentPhoneStream = phoneStream;
-
+      setStatus('Requesting camera and microphone access...');
+      const phoneStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       remoteVideo.srcObject = phoneStream;
       remoteVideo.muted = true;
       remoteVideo.play().catch(() => {});
@@ -369,19 +252,16 @@
 
         const outbound = peer.call(roomId, phoneStream);
         outbound.on('error', (err) => setStatus('Call error: ' + err.type));
-        setStatus('Phone connected. Sending video feed to PC...');
+        setStatus('Calling the PC room...');
       });
 
-      peer.on('error', (err) => {
-        console.error(err);
-        setStatus('PeerJS error: ' + err.type);
-      });
+      peer.on('error', (err) => setStatus('PeerJS error: ' + err.type));
     }
 
     function startRecording() {
-      if (!combinedStream) return;
+      if (!remoteVideo.srcObject) return;
       chunks = [];
-      recorder = new MediaRecorder(combinedStream, { mimeType: 'video/webm;codecs=vp9,opus' });
+      recorder = new MediaRecorder(remoteVideo.srcObject, { mimeType: 'video/webm;codecs=vp9,opus' });
       recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
       recorder.onstop = () => {
         const blob = new Blob(chunks, { type: 'video/webm' });
@@ -393,7 +273,7 @@
       recorder.start();
       recordBtn.disabled = true;
       stopRecordBtn.disabled = false;
-      setStatus('Recording started. Capturing phone video + selected microphone.');
+      setStatus('Recording...');
     }
 
     function stopRecording() {
@@ -411,9 +291,6 @@
     });
     recordBtn.addEventListener('click', startRecording);
     stopRecordBtn.addEventListener('click', stopRecording);
-    refreshDevicesBtn.addEventListener('click', loadDevices);
-
-    loadDevices();
 
     if (roomId) {
       makeQr(location.href);
