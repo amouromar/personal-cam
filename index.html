@@ -116,12 +116,18 @@
         <select id="cameraSelect">
           <option>Loading cameras...</option>
         </select>
+
         <select id="micSelect">
           <option>Loading microphones...</option>
         </select>
+
+        <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;background:#10192f;border-radius:14px;border:1px solid var(--border);font-size:14px;">
+          <input type="checkbox" id="usePcMic" checked />
+          Use PC microphone for recording
+        </label>
+
         <button id="refreshDevicesBtn" class="secondary">Refresh devices</button>
         <button id="hostBtn">Create room on this PC</button>
-        <span class="badge">🎤 Plug in your studio mic before joining</span>
         <button id="copyBtn" class="secondary" disabled>Copy room link</button>
         <span id="roleBadge" class="badge">Not connected</span>
       </div>
@@ -177,6 +183,7 @@
     const cameraSelect = document.getElementById('cameraSelect');
     const micSelect = document.getElementById('micSelect');
     const refreshDevicesBtn = document.getElementById('refreshDevicesBtn');
+    const usePcMic = document.getElementById('usePcMic');
     const qrcodeEl = document.getElementById('qrcode');
     const statusEl = document.getElementById('status');
     const roomText = document.getElementById('roomText');
@@ -191,6 +198,8 @@
     let chunks = [];
     let roomId = new URLSearchParams(location.search).get('room');
     let currentPhoneStream;
+    let pcMicStream;
+    let combinedStream;
 
     function setStatus(msg) { statusEl.textContent = msg; }
     function setBadge(msg) { roleBadge.textContent = msg; }
@@ -239,6 +248,26 @@
       return u.toString();
     }
 
+    async function getPcMicStream() {
+      try {
+        const selectedMic = micSelect.value;
+
+        pcMicStream = await navigator.mediaDevices.getUserMedia({
+          audio: selectedMic ? {
+            deviceId: { exact: selectedMic },
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false
+          } : true,
+          video: false
+        });
+
+        return pcMicStream;
+      } catch (err) {
+        setStatus('PC microphone failed: ' + err.message);
+      }
+    }
+
     async function startHost() {
       setStatus('Creating room...');
       peer = new Peer();
@@ -263,12 +292,32 @@
       peer.on('call', (incomingCall) => {
         call = incomingCall;
         incomingCall.answer();
-        incomingCall.on('stream', (phoneStream) => {
+        incomingCall.on('stream', async (phoneStream) => {
           stream = phoneStream;
-          remoteVideo.srcObject = phoneStream;
+
+          const finalTracks = [];
+
+          // video always from phone
+          const phoneVideoTracks = phoneStream.getVideoTracks();
+          finalTracks.push(...phoneVideoTracks);
+
+          // choose audio source
+          if (usePcMic.checked) {
+            const pcMic = await getPcMicStream();
+            if (pcMic) {
+              finalTracks.push(...pcMic.getAudioTracks());
+              setStatus('Using PHONE camera + PC microphone.');
+            }
+          } else {
+            finalTracks.push(...phoneStream.getAudioTracks());
+            setStatus('Using PHONE camera + PHONE microphone.');
+          }
+
+          combinedStream = new MediaStream(finalTracks);
+
+          remoteVideo.srcObject = combinedStream;
           remoteVideo.play().catch(() => {});
           setBadge('Streaming');
-          setStatus('Camera + mic stream live on the PC.');
           recordBtn.disabled = false;
         });
       });
@@ -317,9 +366,9 @@
     }
 
     function startRecording() {
-      if (!remoteVideo.srcObject) return;
+      if (!combinedStream) return;
       chunks = [];
-      recorder = new MediaRecorder(remoteVideo.srcObject, { mimeType: 'video/webm;codecs=vp9,opus' });
+      recorder = new MediaRecorder(combinedStream, { mimeType: 'video/webm;codecs=vp9,opus' });
       recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
       recorder.onstop = () => {
         const blob = new Blob(chunks, { type: 'video/webm' });
@@ -331,7 +380,7 @@
       recorder.start();
       recordBtn.disabled = true;
       stopRecordBtn.disabled = false;
-      setStatus('Recording...');
+      setStatus('Recording started. Capturing phone video + selected microphone.');
     }
 
     function stopRecording() {
