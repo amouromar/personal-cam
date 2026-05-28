@@ -6,7 +6,7 @@
   <title>Phone Camera Bridge</title>
   <style>
     :root {
-      --bg: #080c14;
+      --bg: #0b1220;
       --panel: #111a2e;
       --panel-2: #0f172a;
       --text: #e5eefc;
@@ -113,7 +113,15 @@
       <h1>Phone Camera Bridge</h1>
       <p>Open this on the computer. It will create a room, show a QR code, and receive your phone camera + mic over WebRTC.</p>
       <div class="row" style="margin: 14px 0 16px;">
+        <select id="cameraSelect">
+          <option>Loading cameras...</option>
+        </select>
+        <select id="micSelect">
+          <option>Loading microphones...</option>
+        </select>
+        <button id="refreshDevicesBtn" class="secondary">Refresh devices</button>
         <button id="hostBtn">Create room on this PC</button>
+        <span class="badge">🎤 Plug in your studio mic before joining</span>
         <button id="copyBtn" class="secondary" disabled>Copy room link</button>
         <span id="roleBadge" class="badge">Not connected</span>
       </div>
@@ -166,6 +174,9 @@
     const recordBtn = document.getElementById('recordBtn');
     const stopRecordBtn = document.getElementById('stopRecordBtn');
     const remoteVideo = document.getElementById('remoteVideo');
+    const cameraSelect = document.getElementById('cameraSelect');
+    const micSelect = document.getElementById('micSelect');
+    const refreshDevicesBtn = document.getElementById('refreshDevicesBtn');
     const qrcodeEl = document.getElementById('qrcode');
     const statusEl = document.getElementById('status');
     const roomText = document.getElementById('roomText');
@@ -179,6 +190,7 @@
     let recorder;
     let chunks = [];
     let roomId = new URLSearchParams(location.search).get('room');
+    let currentPhoneStream;
 
     function setStatus(msg) { statusEl.textContent = msg; }
     function setBadge(msg) { roleBadge.textContent = msg; }
@@ -186,6 +198,39 @@
     function makeQr(url) {
       qrcodeEl.innerHTML = '';
       new QRCode(qrcodeEl, { text: url, width: 210, height: 210 });
+    }
+
+    async function loadDevices() {
+      try {
+        const temp = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        temp.getTracks().forEach(track => track.stop());
+
+        const devices = await navigator.mediaDevices.enumerateDevices();
+
+        cameraSelect.innerHTML = '';
+        micSelect.innerHTML = '';
+
+        const cameras = devices.filter(d => d.kind === 'videoinput');
+        const mics = devices.filter(d => d.kind === 'audioinput');
+
+        cameras.forEach((cam, i) => {
+          const option = document.createElement('option');
+          option.value = cam.deviceId;
+          option.textContent = cam.label || `Camera ${i + 1}`;
+          cameraSelect.appendChild(option);
+        });
+
+        mics.forEach((mic, i) => {
+          const option = document.createElement('option');
+          option.value = mic.deviceId;
+          option.textContent = mic.label || `Microphone ${i + 1}`;
+          micSelect.appendChild(option);
+        });
+
+        setStatus('Devices loaded.');
+      } catch (err) {
+        setStatus('Could not load devices: ' + err.message);
+      }
     }
 
     function buildRoomLink(id) {
@@ -240,7 +285,20 @@
       }
       setBadge('Phone');
       setStatus('Requesting camera and microphone access...');
-      const phoneStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      const selectedCamera = cameraSelect.value;
+      const selectedMic = micSelect.value;
+
+      const phoneStream = await navigator.mediaDevices.getUserMedia({
+        video: selectedCamera ? { deviceId: { exact: selectedCamera } } : true,
+        audio: selectedMic ? {
+          deviceId: { exact: selectedMic },
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false
+        } : true
+      });
+
+      currentPhoneStream = phoneStream;
       remoteVideo.srcObject = phoneStream;
       remoteVideo.muted = true;
       remoteVideo.play().catch(() => {});
@@ -291,6 +349,9 @@
     });
     recordBtn.addEventListener('click', startRecording);
     stopRecordBtn.addEventListener('click', stopRecording);
+    refreshDevicesBtn.addEventListener('click', loadDevices);
+
+    loadDevices();
 
     if (roomId) {
       makeQr(location.href);
