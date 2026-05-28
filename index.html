@@ -111,7 +111,7 @@
   <div class="app">
     <div class="card">
       <h1>Phone Camera Bridge</h1>
-      <p>Open this on the computer. It will create a room, show a QR code, and receive your phone camera + mic over WebRTC.</p>
+      <p>Open this on the computer. It will create a room, show a QR code, and receive your phone camera over WebRTC while using the local PC Mic.</p>
       <div class="row" style="margin: 14px 0 16px;">
         <button id="hostBtn">Create room on this PC</button>
         <button id="copyBtn" class="secondary" disabled>Copy room link</button>
@@ -127,7 +127,7 @@
             <button id="stopRecordBtn" class="danger" disabled>Stop recording</button>
             <a id="downloadLink" style="display:none;" download="phone-recording.webm">Download recording</a>
           </div>
-          <p class="small">The PC can record the incoming stream after the phone connects.</p>
+          <p class="small">The PC will record the phone's video combined with your PC's crisp microphone audio.</p>
         </div>
 
         <div class="panel">
@@ -135,7 +135,7 @@
           <div class="qr-wrap">
             <div id="qrcode"></div>
           </div>
-          <p class="small">Open the same link on your phone, grant camera and microphone access, then it will stream to this PC.</p>
+          <p class="small">Open the same link on your phone, grant camera access, then it will stream to this PC.</p>
           <p class="small mono" id="roomText">Room: —</p>
         </div>
       </div>
@@ -151,9 +151,9 @@
       <div class="panel" style="margin-top:16px;">
         <h4 style="margin-top:0;">How to use</h4>
         <p class="small">1. Open this page on the PC.</p>
-        <p class="small">2. Tap “Create room on this PC”.</p>
+        <p class="small">2. Tap “Create room on this PC” (and accept PC mic permissions).</p>
         <p class="small">3. Scan the QR with your phone.</p>
-        <p class="small">4. Allow camera + mic on the phone.</p>
+        <p class="small">4. Allow camera-only on the phone.</p>
       </div>
     </div>
   </div>
@@ -175,7 +175,8 @@
     let peer;
     let conn;
     let call;
-    let stream;
+    let combinedStream; 
+    let pcAudioStream;   
     let recorder;
     let chunks = [];
     let roomId = new URLSearchParams(location.search).get('room');
@@ -195,6 +196,15 @@
     }
 
     async function startHost() {
+      setStatus('Requesting PC microphone access...');
+      try {
+        // Capture PC mic audio right away
+        pcAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (err) {
+        setStatus('Failed to access PC microphone: ' + err.message);
+        return;
+      }
+
       setStatus('Creating room...');
       peer = new Peer();
 
@@ -205,7 +215,7 @@
         makeQr(link);
         copyBtn.disabled = false;
         setBadge('Room ready');
-        setStatus('Room ready. Scan the QR on your phone.');
+        setStatus('Room ready. PC Mic active. Scan the QR on your phone.');
         hostBtn.disabled = true;
       });
 
@@ -219,11 +229,17 @@
         call = incomingCall;
         incomingCall.answer();
         incomingCall.on('stream', (phoneStream) => {
-          stream = phoneStream;
-          remoteVideo.srcObject = phoneStream;
+          // Splice the phone's incoming video track with the PC's clean microphone track
+          const videoTrack = phoneStream.getVideoTracks()[0];
+          const audioTrack = pcAudioStream.getAudioTracks()[0];
+          
+          combinedStream = new MediaStream([videoTrack, audioTrack]);
+          
+          remoteVideo.srcObject = combinedStream;
           remoteVideo.play().catch(() => {});
+          
           setBadge('Streaming');
-          setStatus('Camera + mic stream live on the PC.');
+          setStatus('Phone camera live on PC (Using local PC Microphone).');
           recordBtn.disabled = false;
         });
       });
@@ -239,8 +255,10 @@
         return;
       }
       setBadge('Phone');
-      setStatus('Requesting camera and microphone access...');
-      const phoneStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      setStatus('Requesting phone camera access (audio disabled)...');
+      
+      // Request ONLY video from the phone to avoid muddy audio entirely
+      const phoneStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       remoteVideo.srcObject = phoneStream;
       remoteVideo.muted = true;
       remoteVideo.play().catch(() => {});
@@ -261,6 +279,8 @@
     function startRecording() {
       if (!remoteVideo.srcObject) return;
       chunks = [];
+      
+      // The recorder targets the combinedStream containing phone video + PC mic audio
       recorder = new MediaRecorder(remoteVideo.srcObject, { mimeType: 'video/webm;codecs=vp9,opus' });
       recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
       recorder.onstop = () => {
@@ -297,7 +317,6 @@
       roomText.textContent = 'Room: ' + roomId;
       setBadge('Join from phone');
       setStatus('Open this same page on the phone, then allow camera access.');
-      // On mobile, auto-join when the page loads.
       if (/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)) {
         joinPhone().catch(err => setStatus('Camera permission failed: ' + err.message));
       }
