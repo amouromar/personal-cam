@@ -44,13 +44,14 @@
     h1 { margin: 0 0 8px; font-size: 28px; }
     p { margin: 6px 0; color: var(--muted); line-height: 1.5; }
     .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-    button, input {
+    button, input, select {
       border-radius: 14px;
       border: 1px solid var(--border);
       background: #0b1325;
       color: var(--text);
       padding: 12px 14px;
       font-size: 15px;
+      outline: none;
     }
     button {
       cursor: pointer;
@@ -60,7 +61,8 @@
     button.good { background: linear-gradient(180deg, #17663a, #124d2c); }
     button.danger { background: linear-gradient(180deg, #7a1c1c, #551414); }
     button:disabled { opacity: .45; cursor: not-allowed; }
-    input { width: min(100%, 420px); }
+    input, select { width: min(100%, 420px); }
+    select { cursor: pointer; appearance: none; padding-right: 30px; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23e5eefc' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'></polyline></svg>"); background-repeat: no-repeat; background-position: right 10px center; background-size: 16px; }
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     .panel {
       background: rgba(9,14,27,.75);
@@ -144,6 +146,12 @@
     <div class="card">
       <h3 style="margin-top:0;">Phone side</h3>
       <p>When you open the QR on your phone, the app will detect the room automatically and ask for camera permission.</p>
+      
+      <div class="panel" id="camSelectPanel" style="display: none; margin-bottom: 16px;">
+        <label for="videoSource" style="display:block; margin-bottom: 8px; font-size:14px; color:var(--muted);">Select Camera:</label>
+        <select id="videoSource" style="width: 100%;"></select>
+      </div>
+
       <div class="panel">
         <p class="status" id="status">Idle.</p>
         <p class="small">Tip: keep both devices on the internet. This demo uses a public PeerJS signaling server for simplicity.</p>
@@ -153,7 +161,7 @@
         <p class="small">1. Open this page on the PC.</p>
         <p class="small">2. Tap “Create room on this PC” (and accept PC mic permissions).</p>
         <p class="small">3. Scan the QR with your phone.</p>
-        <p class="small">4. Allow camera-only on the phone.</p>
+        <p class="small">4. Allow camera access and pick your target lens from the dropdown list.</p>
       </div>
     </div>
   </div>
@@ -171,12 +179,17 @@
     const roomText = document.getElementById('roomText');
     const roleBadge = document.getElementById('roleBadge');
     const downloadLink = document.getElementById('downloadLink');
+    
+    // Camera selection elements
+    const camSelectPanel = document.getElementById('camSelectPanel');
+    const videoSourceSelect = document.getElementById('videoSource');
 
     let peer;
     let conn;
     let call;
     let combinedStream; 
     let pcAudioStream;   
+    let currentLocalStream; // Tracks phone stream to clean it up when switching cameras
     let recorder;
     let chunks = [];
     let roomId = new URLSearchParams(location.search).get('room');
@@ -198,7 +211,6 @@
     async function startHost() {
       setStatus('Requesting PC microphone access...');
       try {
-        // Capture PC mic audio right away
         pcAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       } catch (err) {
         setStatus('Failed to access PC microphone: ' + err.message);
@@ -226,10 +238,12 @@
       });
 
       peer.on('call', (incomingCall) => {
+        // If an old call exists (e.g. from a camera switch), close it out
+        if (call) call.close();
+        
         call = incomingCall;
         incomingCall.answer();
         incomingCall.on('stream', (phoneStream) => {
-          // Splice the phone's incoming video track with the PC's clean microphone track
           const videoTrack = phoneStream.getVideoTracks()[0];
           const audioTrack = pcAudioStream.getAudioTracks()[0];
           
@@ -249,38 +263,91 @@
       });
     }
 
-    async function joinPhone() {
+    // Queries physical cameras available and fills out the select dropdown
+    async function getCameras() {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        videoSourceSelect.innerHTML = '';
+        let count = 1;
+        
+        devices.forEach(device => {
+          if (device.kind === 'videoinput') {
+            const option = document.createElement('option');
+            option.value = device.deviceId;
+            // Provide a fallback name if browsers block labels before explicit permission
+            option.text = device.label || `Camera ${count++}`;
+            videoSourceSelect.appendChild(option);
+          }
+        });
+        
+        camSelectPanel.style.display = 'block';
+      } catch (e) {
+        console.error('Error listing cameras:', e);
+      }
+    }
+
+    async function joinPhone(explicitDeviceId = null) {
       if (!roomId) {
         setStatus('No room id found in the QR link.');
         return;
       }
       setBadge('Phone');
-      setStatus('Requesting phone camera access (audio disabled)...');
-      
-      // Request ONLY video from the phone to avoid muddy audio entirely
-      const phoneStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-      remoteVideo.srcObject = phoneStream;
+      setStatus('Configuring phone video track...');
+
+      // Clean up previous active camera tracks if switching mid-stream
+      if (currentLocalStream) {
+        currentLocalStream.getTracks().forEach(track => track.stop());
+      }
+
+      // Configure video constraints dynamically based on device selection
+      const videoConstraints = explicitDeviceId 
+        ? { deviceId: { exact: explicitDeviceId } }
+        : { facingMode: { ideal: "environment" } }; // Defaults to back camera if running fresh
+
+      // Pull down video only
+      currentLocalStream = await navigator.mediaDevices.getUserMedia({ 
+        video: videoConstraints, 
+        audio: false 
+      });
+
+      remoteVideo.srcObject = currentLocalStream;
       remoteVideo.muted = true;
       remoteVideo.play().catch(() => {});
 
-      peer = new Peer();
-      peer.on('open', (id) => {
-        conn = peer.connect(roomId);
-        conn.on('open', () => conn.send({ type: 'phone-ready', peerId: id }));
+      // Enumerate and show the source drop-down menu on the phone screen
+      await getCameras();
+      
+      // Sync dropdown value to the currently active track's true ID
+      const activeTrack = currentLocalStream.getVideoTracks()[0];
+      if (activeTrack && activeTrack.getSettings) {
+        const currentId = activeTrack.getSettings().deviceId;
+        if (currentId) videoSourceSelect.value = currentId;
+      }
 
-        const outbound = peer.call(roomId, phoneStream);
+      // Set up/Reuse peer configuration
+      if (!peer || peer.destroyed) {
+        peer = new Peer();
+        peer.on('open', (id) => {
+          conn = peer.connect(roomId);
+          conn.on('open', () => conn.send({ type: 'phone-ready', peerId: id }));
+          
+          const outbound = peer.call(roomId, currentLocalStream);
+          outbound.on('error', (err) => setStatus('Call error: ' + err.type));
+          setStatus('Streaming to the PC room...');
+        });
+        peer.on('error', (err) => setStatus('PeerJS error: ' + err.type));
+      } else {
+        // Peer already active? Shoot a new stream call over directly
+        const outbound = peer.call(roomId, currentLocalStream);
         outbound.on('error', (err) => setStatus('Call error: ' + err.type));
-        setStatus('Calling the PC room...');
-      });
-
-      peer.on('error', (err) => setStatus('PeerJS error: ' + err.type));
+        setStatus('Camera switched! Streaming new lens to PC...');
+      }
     }
 
     function startRecording() {
       if (!remoteVideo.srcObject) return;
       chunks = [];
       
-      // The recorder targets the combinedStream containing phone video + PC mic audio
       recorder = new MediaRecorder(remoteVideo.srcObject, { mimeType: 'video/webm;codecs=vp9,opus' });
       recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
       recorder.onstop = () => {
@@ -311,6 +378,11 @@
     });
     recordBtn.addEventListener('click', startRecording);
     stopRecordBtn.addEventListener('click', stopRecording);
+
+    // Event listener to trigger hot camera switching when dropdown is toggled
+    videoSourceSelect.addEventListener('change', (e) => {
+      joinPhone(e.target.value).catch(err => setStatus('Camera switch failed: ' + err.message));
+    });
 
     if (roomId) {
       makeQr(location.href);
